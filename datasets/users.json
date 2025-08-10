@@ -51,5 +51,16 @@
         "preferred_environment": "Forest Cabin",
         "budget": 180,
         "password": "90875e85c5a5c6dfc24ecf6a89f84f9edbab229c0b793474f996f4daac888059"
+    },
+    {
+        "user_id": "eliana_08",
+        "name": "Eliana",
+        "group_size": "4",
+        "preferred_environment": [
+            "Cool",
+            "Isolated"
+        ],
+        "budget": "120",
+        "password": "ba78ef1b08582a45a66dbd906122435202ae9744604a23a9124d5fe761b062e6"
     }
 ]

@@ -39,6 +39,46 @@ def login(user_id, password, users):
             return
     print("❌ User ID not found.")
         
+def sign_up():
+    """
+    Handle user sign up.
+    Prompts for user details and saves them to the users JSON file.
+    """
+    users = load_users(USERS_FILE)
+    print("\n" + "="*30)
+    print("      SIGN UP")
+    print("="*30)
+    
+    user_id = input("Enter User ID: ")
+    if any(user["user_id"] == user_id for user in users):
+        print("❌ User ID already exists. Please try a different one.")
+        return
+    
+    name = input("Enter Name: ")
+    group_size = input("Enter Group Size: ")
+    pref_input = input("Enter Preferred Environment(s) (comma-separated): ")
+    preferred_environment = [pref.strip() for pref in pref_input.split(',') if pref.strip()]
+    budget = input("Enter Budget: ")
+    
+    password = input("Create Password: ")
+    hashed_password = hashlib.sha256(password.encode()).hexdigest()
+    
+    new_user = {
+        "user_id": user_id,
+        "name": name,
+        "group_size": group_size,
+        "preferred_environment": preferred_environment,
+        "budget": budget,
+        "password": hashed_password
+    }
+    
+    users.append(new_user)
+    
+    # Write the updated users list back to the JSON file
+    with open(USERS_FILE, 'w') as f:
+        json.dump(users, f, indent=4)
+    
+    print(f"✅ Sign up successful! Welcome {name}. You can now log in.")
 
 def login_menu(user_id, users):
     print("\n" + "="*30)
@@ -161,8 +201,8 @@ def main_menu():
         entered_password = input("Enter Password: ")
         login(entered_user_id, entered_password, users)
     elif choice == '2':
-        print("You selected Sign Up.")
-        # Call sign up function here
+        sign_up()
+        main_menu()
     else:
         print("Invalid choice. Please try again.")
         main_menu()
