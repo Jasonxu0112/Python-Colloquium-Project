@@ -28,15 +28,15 @@ class SbertRecommender:
         # Calculate embeddings for properties
         self.property_vectors = self.embed_to_vector(self.property_texts)
 
-    def compose_property_text(self, property_dict):
+    def compose_property_text(self, property):
         """
         Compose property information (from dict) to a structured text for embedding (vectorization)
         location + type + features + tags.
         """
-        location = str(property_dict.get("location", "")).strip()
-        type_ = str(property_dict.get("type", "")).strip()
-        features = property_dict.get("features", [])
-        tags = property_dict.get("tags", [])
+        location = str(property.get("location", "")).strip()
+        type_ = str(property.get("type", "")).strip()
+        features = property.get("features", [])
+        tags = property.get("tags", [])
 
         string = []
         if location:
@@ -50,40 +50,57 @@ class SbertRecommender:
 
         return " ; ".join(string)
 
-    def compose_user_text(self, user_dict):
+    def compose_user_text(self, user):
         """
         Compose user preferred environment to a structured text for embedding (vectorization)
         """
-        preferred_env = user_dict.get("preferred_environment") or []
+        preferred_env = user.get("preferred_environment")
         return "preferred_environment: " + ", ".join(preferred_env)
 
     def embed_to_vector(self, texts):
         """
         Calculate embeddings for texts
         """
-        return self.model.encode(texts, show_progress_bar=True, convert_to_tensor=True)
+        return self.model.encode(texts, convert_to_tensor=True)
 
     def recommend_logic(self, user, top_n=5):
         """
         Based on the similarity between user_
         """
         user_text = self.compose_user_text(user)
+        
+        user_budget = float(user.get("budget").strip())
+        
+        # Filter all properties that is under the budget
+        mask_i = []
+        for i, prop in enumerate(self.properties):
+            if (float(prop.get("price_per_night")) <= user_budget):
+                mask_i.append(i)
+        print(mask_i)
+        
         user_vector = self.embed_to_vector([user_text])[0]
-        # similarities = self.model.similarity(user_vector, self.property_vectors)
-        similarities = util.cos_sim(user_vector, self.property_vectors)[0]
-        print(f"similarities: {similarities}")
+        
+        filtered_property_vector = self.property_vectors[mask_i]
+        print(filtered_property_vector.shape)
+        similarities = util.cos_sim(user_vector, filtered_property_vector)[0]
+        # print(f"similarities: {similarities}")
+        
 
-        num_properties = len(similarities)
+        num_properties = len(filtered_property_vector)
         top_n = min(top_n, num_properties)
-        order = np.argsort(-similarities)[:top_n]
-        print(f"order: {order}")
+        
+        order_on_mask_i = np.argsort(-similarities)[:top_n]    
+        # example output: [2, 3, 1, 0], which shows the rank order based on the filtered vector (mask)
+        print(f"order based on the mask: {order_on_mask_i}")
 
         results = []
-        for idx in order:
+        for i in order_on_mask_i:
+            idx = mask_i[i] # true index of property
             results.append(
                 {
                     "property_id": self.properties[idx]["property_id"],
-                    "similarities": float(similarities[idx]),
+                    "similarities": float(similarities[i]),
+                    "price_per_night": self.properties[idx]["price_per_night"],
                     "text": self.property_texts[idx],
                 }
             )
@@ -1776,8 +1793,8 @@ if __name__ == "__main__":
 
     user = {
         "user_id": "u001",
-        "preferred_environment": ["Ocean", "Toronto"],
-        "budget": "200",
+        "preferred_environment": ["Canada", "Mountain"],
+        "budget": "500",
     }
 
     recommender = SbertRecommender(properties)
