@@ -2,7 +2,7 @@
     {
         "user_id": "manav_01",
         "name": "Manav",
-        "group_size": "10",
+        "group_size": "3",
         "preferred_environment": [
             "Mountain Cabin",
             "Cozy Huts",
@@ -62,5 +62,26 @@
         ],
         "budget": "120",
         "password": "ba78ef1b08582a45a66dbd906122435202ae9744604a23a9124d5fe761b062e6"
+    },
+    {
+        "user_id": "dummy",
+        "name": "dummy",
+        "group_size": "3",
+        "preferred_environment": [
+            "dummy"
+        ],
+        "budget": "345",
+        "password": "b5a2c96250612366ea272ffac6d9744aaf4b45aacd96aa7cfcb931ee3b558259"
+    },
+    {
+        "user_id": "123",
+        "name": "Ishaan",
+        "group_size": "5",
+        "preferred_environment": [
+            "cozy",
+            "comfort"
+        ],
+        "budget": "100",
+        "password": "88d4266fd4e6338d13b845fcf289579d209c897823b9217da3e161936f031589"
     }
 ]
