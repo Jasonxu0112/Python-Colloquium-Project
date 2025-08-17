@@ -1,101 +1,255 @@
-# sbert_recommender.py
+# This script loads property listings, generates embeddings, and stores them in a vector database for later querying.
+
 from sentence_transformers import SentenceTransformer, util
 import numpy as np
 
-"""
+import json
+import sqlite3
+import os
+
+BASE_DIR = os.path.dirname(__file__)
+# Path to the property listings JSON file (robust to script location)
+PROPERTIES_FILE = os.path.abspath(
+    os.path.join(BASE_DIR, "..", "datasets", "property_listings.json")
+)
+# Path to save the SQLite database (always in the Vector embeddings folder)
+SQLITE_DB_FILE = os.path.abspath(os.path.join(BASE_DIR, "property_vector_db.sqlite"))
+
+
+MODEL_DIR = os.path.join(os.path.join(BASE_DIR, "sbert_models"), "saved_model")
+
+
+
+################ PUBLIC FUNCTIONS ################
+
+# Check if the embeddings table already exists; if so, exit early
+def embeddings_table_exists(db_file):
+    conn = sqlite3.connect(db_file)
+    c = conn.cursor()
+    c.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='property_embeddings'"
+    )
+    exists = c.fetchone()
+    conn.close()
+    return bool(exists)
+
+
+def load_model(MODEL_NAME="all-MiniLM-L6-v2"):
+    """
+    Load the SBERT model from local cache or download it from Hugging Face Hub.
+    """
+    # ensure dir exists
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    # Check if the model directory exists and is not empty
+    if os.path.exists(MODEL_DIR) and os.listdir(MODEL_DIR):
+        print(f"[LOG] Load model from cache: {MODEL_DIR}")
+        return SentenceTransformer(MODEL_DIR)
+    
+    # Otherwise, download the model from Hugging Face Hub
+    print(f"[LOG] Download model {MODEL_NAME} and save to cache...")
+    model = SentenceTransformer(MODEL_NAME)
+    model.save(MODEL_DIR)
+    return model
+
+
+def init_embeddings_to_sqlite(model=None, db_file=SQLITE_DB_FILE):
+    """
+    Initialize the SQLite database with property embeddings.
+    If the embeddings table already exists, exit early.
+    """
+    if embeddings_table_exists(db_file):
+        print(f"[LOG] Embeddings table already exists in {db_file}.")
+        return
+
+    # Load properties from JSON file
+    if not os.path.exists(PROPERTIES_FILE):
+        raise FileNotFoundError(f"Properties file not found: {PROPERTIES_FILE}")
+
+    with open(PROPERTIES_FILE, 'r') as f:
+        data = json.load(f)
+    properties = data.get("properties", [])
+    if not properties:
+        print("[LOG] No properties found in JSON; nothing to initialize.")
+        return
+
+    # Add properties to the database
+    model = model or load_model()
+    add_properties(properties, model, db_file)
+
+
+
+def ensure_table(conn):
+    """
+    Ensure the property_embeddings table exists in the SQLite database.
+    Otherwise, create it.
+    """
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS property_embeddings (
+            property_id TEXT PRIMARY KEY,
+            embedding   BLOB,
+            location    TEXT,
+            type        TEXT,
+            features    TEXT,
+            tags        TEXT
+        )
+    """)
+    conn.commit()
+
+
+def add_properties(new_props, model, db_file=SQLITE_DB_FILE):
+    """
+    通用增量写入：
+      - 支持传入 单条 dict 或 多条 list[dict]/iterable
+      - 批量 encode，单次事务写入（更高效）
+      - INSERT OR REPLACE：同一个 property_id 视为更新
+      
+    new_prop: dict, e.g. {"property_id": "P100", "location": "Toronto", "type": "Apartment", ...}
+    返回：成功写入/更新的条数
+    """
+    # 1. 统一成列表
+    if isinstance(new_props, dict):
+        # Single property dict
+        new_props = [new_props]
+
+    if not new_props:
+        # No properties to add
+        print("[LOG] No properties to add.")
+        return 0
+
+    # 2. Batch create embeddings
+    texts = [compose_property_text(p) for p in new_props]
+    
+    # use convert_to_numpy=True to get numpy array directly, convert to float32 for SQLite BLOB storage 
+    # otherwise it will be torch.Tensor (which is not serializable)
+    embs = model.encode(texts, convert_to_numpy=True).astype(np.float32)
+    
+    # 3. Create rows_data
+    rows_data = [
+        (
+            p["property_id"],
+            emb.tobytes(),
+            p.get("location", ""),
+            p.get("type", ""),
+            ",".join(p.get("features", []) or []),
+            ",".join(p.get("tags", []) or []),
+        )
+        for p, emb in zip(new_props, embs)
+    ]
+    
+    # 4. Batch insert into database
+    conn = sqlite3.connect(db_file)
+    ensure_table(conn)
+    conn.executemany("""
+        INSERT OR REPLACE INTO property_embeddings
+        (property_id, embedding, location, type, features, tags)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, rows_data)
+    conn.commit()
+    conn.close()
+
+    print(f"[LOG] Upserted {len(rows_data)} record(s) into {db_file}.")
+    return len(rows_data)
+    
+    
+
+def compose_property_text(property):
+    """
+    Compose property information (from dict) to a structured text for embedding (vectorization)
+    location + type + features + tags.
+    """
+    location = str(property.get("location", "")).strip()
+    type_ = str(property.get("type", "")).strip()
+    features = property.get("features") if isinstance(property.get("features"), list) else []
+    tags = property.get("tags") if isinstance(property.get("tags"), list) else []
+
+    string = []
+    if location:
+        string.append(f"location: {location}")
+    if type_:
+        string.append(f"type: {(type_)}")
+    if features:
+        string.append("features: " + ", ".join(features))
+    if tags:
+        string.append("tags: " + ", ".join(tags))
+
+    return " ; ".join(string)
+
+
+
+
+
+################# SBERT RECOMMENDER CLASS ################
+class SbertRecommender:
+    """
     Doc Reference: https://sbert.net/examples/sentence_transformer/applications/computing-embeddings/README.html
     Video Reference: https://www.youtube.com/watch?app=desktop&v=nZ5j289WN8g
 """
-
-
-class SbertRecommender:
     def __init__(self, properties):
         """
         Initialize the SBERT model, and load properties.
         """
 
         # Load a pretrained Sentence Transformer model
-        self.model = SentenceTransformer("all-MiniLM-L6-v2")
+        self.model = load_model(MODEL_NAME="all-MiniLM-L6-v2")
 
         # Load properties (from dict)
         self.properties = properties
 
         # Compose the property texts to encode
         self.property_texts = [
-            self.compose_property_text(property) for property in properties
+            compose_property_text(property) for property in properties
         ]
 
         # Calculate embeddings for properties
         self.property_vectors = self.embed_to_vector(self.property_texts)
 
-    def compose_property_text(self, property):
-        """
-        Compose property information (from dict) to a structured text for embedding (vectorization)
-        location + type + features + tags.
-        """
-        location = str(property.get("location", "")).strip()
-        type_ = str(property.get("type", "")).strip()
-        features = property.get("features", [])
-        tags = property.get("tags", [])
-
-        string = []
-        if location:
-            string.append(f"location: {location}")
-        if type_:
-            string.append(f"type: {(type_)}")
-        if features:
-            string.append("features: " + ", ".join(features))
-        if tags:
-            string.append("tags: " + ", ".join(tags))
-
-        return " ; ".join(string)
-
     def compose_user_text(self, user):
         """
         Compose user preferred environment to a structured text for embedding (vectorization)
         """
-        preferred_env = user.get("preferred_environment")
+        preferred_env = user.get("preferred_environment") or []
         return "preferred_environment: " + ", ".join(preferred_env)
 
     def embed_to_vector(self, texts):
         """
         Calculate embeddings for texts
         """
-        return self.model.encode(texts, convert_to_tensor=True)
+        return self.model.encode(texts, convert_to_numpy=True).astype(np.float32)
 
     def recommend_logic(self, user, top_n=5):
         """
         Based on the similarity between user_
         """
         user_text = self.compose_user_text(user)
-        
+
         user_budget = float(user.get("budget").strip())
-        
+
         # Filter all properties that is under the budget
         mask_i = []
         for i, prop in enumerate(self.properties):
-            if (float(prop.get("price_per_night")) <= user_budget):
+            if float(prop.get("price_per_night")) <= user_budget:
                 mask_i.append(i)
-        print(mask_i)
-        
+        # print(mask_i)
+
         user_vector = self.embed_to_vector([user_text])[0]
-        
+
         filtered_property_vector = self.property_vectors[mask_i]
-        print(filtered_property_vector.shape)
+        # print(filtered_property_vector.shape)
+        
         similarities = util.cos_sim(user_vector, filtered_property_vector)[0]
         # print(f"similarities: {similarities}")
-        
 
         num_properties = len(filtered_property_vector)
         top_n = min(top_n, num_properties)
-        
-        order_on_mask_i = np.argsort(-similarities)[:top_n]    
+
+        order_on_mask_i = np.argsort(-similarities)[:top_n]
         # example output: [2, 3, 1, 0], which shows the rank order based on the filtered vector (mask)
-        print(f"order based on the mask: {order_on_mask_i}")
+        # print(f"order based on the mask: {order_on_mask_i}")
 
         results = []
         for i in order_on_mask_i:
-            idx = mask_i[i] # true index of property
+            idx = mask_i[i]  # true index of property
             results.append(
                 {
                     "property_id": self.properties[idx]["property_id"],
@@ -109,1693 +263,17 @@ class SbertRecommender:
 
 # ======== Examples ============
 if __name__ == "__main__":
-    properties = [
-        {
-            "property_id": "P00001",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Mountain Cabin",
-            "price_per_night": 300,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Kitchen",
-                "Fireplace",
-                "WiFi",
-                "Mountain View",
-                "Parking",
-                "Hammock",
-                "Private Beach",
-            ],
-            "tags": [
-                "family",
-                "nightlife",
-                "skiing",
-                "hiking",
-                "eco-friendly",
-                "romantic",
-                "adventure",
-                "budget",
-                "secluded",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00002",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Mountain Cabin",
-            "price_per_night": 325,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Kitchen",
-                "WiFi",
-                "Pet Friendly",
-                "Parking",
-                "Hammock",
-                "Private Beach",
-            ],
-            "tags": [
-                "business",
-                "family",
-                "skiing",
-                "hiking",
-                "wine country",
-                "eco-friendly",
-                "romantic",
-                "adventure",
-                "secluded",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00003",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Beach Villa",
-            "price_per_night": 750,
-            "features": [
-                "Heating",
-                "Air Conditioning",
-                "Laundry Service",
-                "Kitchen",
-                "Ski-in/Ski-out",
-                "WiFi",
-                "Parking",
-                "Hot Tub",
-                "Room Service",
-                "Private Beach",
-            ],
-            "tags": [
-                "relaxation",
-                "historic",
-                "family",
-                "hiking",
-                "romantic",
-                "adventure",
-                "luxury",
-                "secluded",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00004",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Beach Villa",
-            "price_per_night": 845,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Kitchen",
-                "Ski-in/Ski-out",
-                "WiFi",
-                "Mountain View",
-                "Parking",
-                "Hammock",
-                "Private Beach",
-            ],
-            "tags": [
-                "business",
-                "cultural",
-                "relaxation",
-                "historic",
-                "hiking",
-                "romantic",
-                "adventure",
-                "secluded",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00005",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Urban Apartment",
-            "price_per_night": 440,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "BBQ",
-                "Kitchen",
-                "Gym Access",
-                "WiFi",
-                "Parking",
-                "Solar Power",
-                "Hot Tub",
-                "Room Service",
-            ],
-            "tags": [
-                "business",
-                "nightlife",
-                "historic",
-                "hiking",
-                "romantic",
-                "adventure",
-                "winter",
-                "city",
-                "secluded",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00006",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Urban Apartment",
-            "price_per_night": 470,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Kitchen",
-                "Ski-in/Ski-out",
-                "Gym Access",
-                "WiFi",
-                "Mountain View",
-                "Pet Friendly",
-                "Parking",
-            ],
-            "tags": [
-                "business",
-                "nightlife",
-                "hiking",
-                "wine country",
-                "romantic",
-                "adventure",
-                "winter",
-                "city",
-                "secluded",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00007",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Countryside Cottage",
-            "price_per_night": 465,
-            "features": [
-                "Heating",
-                "Couple Friendly",
-                "Laundry Service",
-                "Kitchen",
-                "Fireplace",
-                "WiFi",
-                "Parking",
-                "Solar Power",
-            ],
-            "tags": [
-                "relaxation",
-                "family",
-                "hiking",
-                "romantic",
-                "adventure",
-                "budget",
-                "wellness",
-                "secluded",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00008",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Countryside Cottage",
-            "price_per_night": 470,
-            "features": [
-                "Heating",
-                "Couple Friendly",
-                "Laundry Service",
-                "Kitchen",
-                "WiFi",
-                "Ocean View",
-                "Parking",
-                "Hammock",
-                "Pool",
-            ],
-            "tags": [
-                "family",
-                "foodie",
-                "hiking",
-                "romantic",
-                "adventure",
-                "wellness",
-                "city",
-                "secluded",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00009",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Ski Lodge",
-            "price_per_night": 650,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Kitchen",
-                "Gym Access",
-                "WiFi",
-                "Parking",
-                "Pool",
-                "Private Beach",
-                "Room Service",
-            ],
-            "tags": [
-                "foodie",
-                "skiing",
-                "hiking",
-                "romantic",
-                "adventure",
-                "budget",
-                "luxury",
-                "winter",
-                "secluded",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00010",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Ski Lodge",
-            "price_per_night": 575,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Kitchen",
-                "WiFi",
-                "Parking",
-                "Solar Power",
-                "Hammock",
-                "Pool",
-            ],
-            "tags": [
-                "relaxation",
-                "nightlife",
-                "foodie",
-                "skiing",
-                "hiking",
-                "romantic",
-                "adventure",
-                "winter",
-                "secluded",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00011",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Eco Bungalow",
-            "price_per_night": 370,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "BBQ",
-                "Kitchen",
-                "Fireplace",
-                "WiFi",
-                "Mountain View",
-                "Ocean View",
-                "Parking",
-                "Breakfast Included",
-                "Private Beach",
-            ],
-            "tags": [
-                "family",
-                "nightlife",
-                "hiking",
-                "eco-friendly",
-                "romantic",
-                "adventure",
-                "budget",
-                "city",
-                "secluded",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00012",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Eco Bungalow",
-            "price_per_night": 275,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "BBQ",
-                "Kitchen",
-                "WiFi",
-                "Mountain View",
-                "Ocean View",
-                "Parking",
-                "Hot Tub",
-                "Private Beach",
-            ],
-            "tags": [
-                "cultural",
-                "foodie",
-                "hiking",
-                "eco-friendly",
-                "romantic",
-                "adventure",
-                "luxury",
-                "secluded",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00013",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Luxury Hotel",
-            "price_per_night": 1205,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "BBQ",
-                "Kitchen",
-                "Fireplace",
-                "WiFi",
-                "Parking",
-                "Hot Tub",
-            ],
-            "tags": [
-                "family",
-                "hiking",
-                "eco-friendly",
-                "romantic",
-                "adventure",
-                "budget",
-                "luxury",
-                "city",
-                "secluded",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00014",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Luxury Hotel",
-            "price_per_night": 1015,
-            "features": [
-                "Heating",
-                "Air Conditioning",
-                "Laundry Service",
-                "BBQ",
-                "Kitchen",
-                "WiFi",
-                "Parking",
-                "Hammock",
-                "Pool",
-                "Room Service",
-            ],
-            "tags": [
-                "relaxation",
-                "family",
-                "hiking",
-                "romantic",
-                "adventure",
-                "budget",
-                "wellness",
-                "luxury",
-                "secluded",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00015",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Hostel",
-            "price_per_night": 195,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Garden",
-                "Kitchen",
-                "Fireplace",
-                "WiFi",
-                "Ocean View",
-                "Parking",
-                "Breakfast Included",
-                "Room Service",
-            ],
-            "tags": [
-                "family",
-                "foodie",
-                "skiing",
-                "hiking",
-                "romantic",
-                "adventure",
-                "budget",
-                "luxury",
-                "secluded",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00016",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Hostel",
-            "price_per_night": 170,
-            "features": [
-                "Heating",
-                "Air Conditioning",
-                "Laundry Service",
-                "Kitchen",
-                "Balcony",
-                "WiFi",
-                "Mountain View",
-                "Parking",
-                "Pool",
-            ],
-            "tags": [
-                "family",
-                "hiking",
-                "wine country",
-                "eco-friendly",
-                "romantic",
-                "adventure",
-                "budget",
-                "luxury",
-                "secluded",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00017",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Glamping Tent",
-            "price_per_night": 385,
-            "features": [
-                "Heating",
-                "Air Conditioning",
-                "Laundry Service",
-                "BBQ",
-                "Kitchen",
-                "Fireplace",
-                "WiFi",
-                "Parking",
-                "Breakfast Included",
-                "Hot Tub",
-            ],
-            "tags": [
-                "relaxation",
-                "historic",
-                "skiing",
-                "hiking",
-                "eco-friendly",
-                "romantic",
-                "adventure",
-                "luxury",
-                "secluded",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00018",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Glamping Tent",
-            "price_per_night": 370,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Garden",
-                "Kitchen",
-                "Gym Access",
-                "WiFi",
-                "Pet Friendly",
-                "Parking",
-                "Solar Power",
-                "Hot Tub",
-            ],
-            "tags": [
-                "historic",
-                "skiing",
-                "hiking",
-                "eco-friendly",
-                "romantic",
-                "adventure",
-                "wellness",
-                "city",
-                "secluded",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00019",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Houseboat",
-            "price_per_night": 835,
-            "features": [
-                "Heating",
-                "Couple Friendly",
-                "Laundry Service",
-                "Kitchen",
-                "Ski-in/Ski-out",
-                "WiFi",
-                "Mountain View",
-                "Parking",
-                "Hammock",
-                "Hot Tub",
-                "Pool",
-            ],
-            "tags": [
-                "relaxation",
-                "skiing",
-                "hiking",
-                "wine country",
-                "romantic",
-                "adventure",
-                "budget",
-                "secluded",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00020",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Houseboat",
-            "price_per_night": 600,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Kitchen",
-                "WiFi",
-                "Breakfast Included",
-                "Parking",
-                "Hammock",
-                "Hot Tub",
-                "Room Service",
-            ],
-            "tags": [
-                "cultural",
-                "relaxation",
-                "hiking",
-                "romantic",
-                "adventure",
-                "wellness",
-                "surfing",
-                "secluded",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00021",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Treehouse",
-            "price_per_night": 520,
-            "features": [
-                "Heating",
-                "Couple Friendly",
-                "Laundry Service",
-                "BBQ",
-                "Kitchen",
-                "WiFi",
-                "Pet Friendly",
-                "Parking",
-                "Breakfast Included",
-                "Pool",
-            ],
-            "tags": [
-                "relaxation",
-                "historic",
-                "hiking",
-                "eco-friendly",
-                "romantic",
-                "adventure",
-                "wellness",
-                "luxury",
-                "secluded",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00022",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Treehouse",
-            "price_per_night": 400,
-            "features": [
-                "Heating",
-                "Air Conditioning",
-                "Laundry Service",
-                "Garden",
-                "Kitchen",
-                "Gym Access",
-                "Fireplace",
-                "WiFi",
-                "Parking",
-            ],
-            "tags": [
-                "relaxation",
-                "nightlife",
-                "hiking",
-                "eco-friendly",
-                "romantic",
-                "adventure",
-                "winter",
-                "secluded",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00023",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Bed and Breakfast",
-            "price_per_night": 350,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Kitchen",
-                "Gym Access",
-                "Ski-in/Ski-out",
-                "WiFi",
-                "Parking",
-                "Room Service",
-            ],
-            "tags": [
-                "family",
-                "foodie",
-                "hiking",
-                "eco-friendly",
-                "romantic",
-                "adventure",
-                "budget",
-                "luxury",
-                "secluded",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00024",
-            "location": "Banff, Canada - Mountain, Cold",
-            "type": "Bed and Breakfast",
-            "price_per_night": 375,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "BBQ",
-                "Kitchen",
-                "Fireplace",
-                "Balcony",
-                "WiFi",
-                "Parking",
-                "Solar Power",
-                "Hot Tub",
-                "Room Service",
-            ],
-            "tags": [
-                "family",
-                "hiking",
-                "eco-friendly",
-                "romantic",
-                "adventure",
-                "budget",
-                "luxury",
-                "winter",
-                "secluded",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00025",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Mountain Cabin",
-            "price_per_night": 345,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "BBQ",
-                "Kitchen",
-                "WiFi",
-                "Mountain View",
-                "Parking",
-                "Hot Tub",
-            ],
-            "tags": [
-                "business",
-                "relaxation",
-                "family",
-                "wine country",
-                "romantic",
-                "budget",
-                "surfing",
-                "secluded",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00026",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Mountain Cabin",
-            "price_per_night": 240,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Kitchen",
-                "Fireplace",
-                "Balcony",
-                "Gym Access",
-                "WiFi",
-                "Ocean View",
-                "Parking",
-                "Breakfast Included",
-                "Pool",
-            ],
-            "tags": [
-                "business",
-                "cultural",
-                "relaxation",
-                "family",
-                "eco-friendly",
-                "romantic",
-                "surfing",
-                "secluded",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00027",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Beach Villa",
-            "price_per_night": 810,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Kitchen",
-                "Balcony",
-                "WiFi",
-                "Parking",
-                "Solar Power",
-                "Room Service",
-            ],
-            "tags": [
-                "business",
-                "relaxation",
-                "family",
-                "historic",
-                "hiking",
-                "romantic",
-                "wellness",
-                "surfing",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00028",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Beach Villa",
-            "price_per_night": 840,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Garden",
-                "Kitchen",
-                "Fireplace",
-                "Ski-in/Ski-out",
-                "Balcony",
-                "WiFi",
-                "Ocean View",
-                "Parking",
-                "Pet Friendly",
-            ],
-            "tags": [
-                "business",
-                "relaxation",
-                "family",
-                "eco-friendly",
-                "romantic",
-                "budget",
-                "surfing",
-                "winter",
-                "secluded",
-                "beach",
-            ],
-        },
-        {
-            "property_id": "P00029",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Urban Apartment",
-            "price_per_night": 535,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Kitchen",
-                "Balcony",
-                "Gym Access",
-                "Fireplace",
-                "WiFi",
-                "Parking",
-                "Breakfast Included",
-                "Pool",
-                "Private Beach",
-            ],
-            "tags": [
-                "business",
-                "relaxation",
-                "family",
-                "nightlife",
-                "historic",
-                "hiking",
-                "romantic",
-                "surfing",
-                "city",
-                "beach",
-            ],
-        },
-        {
-            "property_id": "P00030",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Urban Apartment",
-            "price_per_night": 490,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Kitchen",
-                "WiFi",
-                "Pet Friendly",
-                "Parking",
-                "Hammock",
-                "Hot Tub",
-                "Room Service",
-            ],
-            "tags": [
-                "business",
-                "relaxation",
-                "family",
-                "nightlife",
-                "foodie",
-                "romantic",
-                "wellness",
-                "surfing",
-                "city",
-                "beach",
-            ],
-        },
-        {
-            "property_id": "P00031",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Countryside Cottage",
-            "price_per_night": 340,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Kitchen",
-                "Balcony",
-                "Gym Access",
-                "Fireplace",
-                "WiFi",
-                "Pet Friendly",
-                "Parking",
-                "Ocean View",
-                "Pool",
-            ],
-            "tags": [
-                "relaxation",
-                "family",
-                "foodie",
-                "romantic",
-                "wellness",
-                "surfing",
-                "city",
-                "secluded",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00032",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Countryside Cottage",
-            "price_per_night": 320,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Garden",
-                "BBQ",
-                "Kitchen",
-                "WiFi",
-                "Parking",
-                "Solar Power",
-                "Breakfast Included",
-                "Hot Tub",
-            ],
-            "tags": [
-                "relaxation",
-                "family",
-                "historic",
-                "foodie",
-                "romantic",
-                "surfing",
-                "city",
-                "secluded",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00033",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Ski Lodge",
-            "price_per_night": 645,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Kitchen",
-                "Balcony",
-                "WiFi",
-                "Mountain View",
-                "Ocean View",
-                "Parking",
-                "Solar Power",
-                "Pet Friendly",
-                "Breakfast Included",
-            ],
-            "tags": [
-                "relaxation",
-                "family",
-                "historic",
-                "skiing",
-                "hiking",
-                "romantic",
-                "adventure",
-                "surfing",
-                "winter",
-                "beach",
-            ],
-        },
-        {
-            "property_id": "P00034",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Ski Lodge",
-            "price_per_night": 610,
-            "features": [
-                "Heating",
-                "Couple Friendly",
-                "Laundry Service",
-                "Garden",
-                "BBQ",
-                "Kitchen",
-                "Ski-in/Ski-out",
-                "Balcony",
-                "WiFi",
-                "Parking",
-                "Pool",
-            ],
-            "tags": [
-                "relaxation",
-                "family",
-                "skiing",
-                "romantic",
-                "adventure",
-                "surfing",
-                "luxury",
-                "winter",
-                "city",
-                "beach",
-            ],
-        },
-        {
-            "property_id": "P00035",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Eco Bungalow",
-            "price_per_night": 230,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Garden",
-                "Kitchen",
-                "Balcony",
-                "WiFi",
-                "Pet Friendly",
-                "Parking",
-                "Hammock",
-                "Hot Tub",
-            ],
-            "tags": [
-                "relaxation",
-                "family",
-                "wine country",
-                "eco-friendly",
-                "romantic",
-                "adventure",
-                "surfing",
-                "secluded",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00036",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Eco Bungalow",
-            "price_per_night": 245,
-            "features": [
-                "Heating",
-                "Couple Friendly",
-                "Laundry Service",
-                "Garden",
-                "Kitchen",
-                "Ski-in/Ski-out",
-                "Balcony",
-                "WiFi",
-                "Parking",
-                "Breakfast Included",
-                "Room Service",
-            ],
-            "tags": [
-                "relaxation",
-                "family",
-                "historic",
-                "eco-friendly",
-                "romantic",
-                "adventure",
-                "surfing",
-                "secluded",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00037",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Luxury Hotel",
-            "price_per_night": 1245,
-            "features": [
-                "Heating",
-                "Air Conditioning",
-                "Laundry Service",
-                "Garden",
-                "Kitchen",
-                "WiFi",
-                "Parking",
-                "Private Beach",
-            ],
-            "tags": [
-                "relaxation",
-                "family",
-                "historic",
-                "hiking",
-                "romantic",
-                "budget",
-                "surfing",
-                "luxury",
-                "winter",
-                "beach",
-            ],
-        },
-        {
-            "property_id": "P00038",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Luxury Hotel",
-            "price_per_night": 1085,
-            "features": [
-                "Heating",
-                "Air Conditioning",
-                "Laundry Service",
-                "Kitchen",
-                "WiFi",
-                "Ocean View",
-                "Parking",
-                "Breakfast Included",
-                "Pool",
-            ],
-            "tags": [
-                "relaxation",
-                "family",
-                "wine country",
-                "romantic",
-                "budget",
-                "surfing",
-                "luxury",
-                "secluded",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00039",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Hostel",
-            "price_per_night": 130,
-            "features": [
-                "Heating",
-                "Air Conditioning",
-                "Couple Friendly",
-                "Laundry Service",
-                "Hammock",
-                "Kitchen",
-                "WiFi",
-                "Parking",
-                "Breakfast Included",
-                "Hot Tub",
-                "Private Beach",
-            ],
-            "tags": [
-                "business",
-                "relaxation",
-                "family",
-                "skiing",
-                "romantic",
-                "budget",
-                "surfing",
-                "luxury",
-                "winter",
-                "beach",
-            ],
-        },
-        {
-            "property_id": "P00040",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Hostel",
-            "price_per_night": 125,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Kitchen",
-                "Gym Access",
-                "WiFi",
-                "Ocean View",
-                "Parking",
-                "Hammock",
-            ],
-            "tags": [
-                "relaxation",
-                "family",
-                "hiking",
-                "romantic",
-                "adventure",
-                "budget",
-                "wellness",
-                "surfing",
-                "luxury",
-                "beach",
-            ],
-        },
-        {
-            "property_id": "P00041",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Glamping Tent",
-            "price_per_night": 375,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Kitchen",
-                "Ski-in/Ski-out",
-                "Fireplace",
-                "WiFi",
-                "Mountain View",
-                "Pet Friendly",
-                "Parking",
-            ],
-            "tags": [
-                "relaxation",
-                "family",
-                "wine country",
-                "eco-friendly",
-                "romantic",
-                "adventure",
-                "surfing",
-                "secluded",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00042",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Glamping Tent",
-            "price_per_night": 320,
-            "features": [
-                "Heating",
-                "Couple Friendly",
-                "Laundry Service",
-                "Kitchen",
-                "Balcony",
-                "WiFi",
-                "Pet Friendly",
-                "Parking",
-            ],
-            "tags": [
-                "relaxation",
-                "family",
-                "eco-friendly",
-                "romantic",
-                "adventure",
-                "surfing",
-                "luxury",
-                "secluded",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00043",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Houseboat",
-            "price_per_night": 640,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Kitchen",
-                "Fireplace",
-                "Balcony",
-                "WiFi",
-                "Parking",
-                "Solar Power",
-                "Room Service",
-            ],
-            "tags": [
-                "relaxation",
-                "family",
-                "nightlife",
-                "historic",
-                "wine country",
-                "romantic",
-                "wellness",
-                "surfing",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00044",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Houseboat",
-            "price_per_night": 480,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Garden",
-                "Kitchen",
-                "Fireplace",
-                "WiFi",
-                "Parking",
-                "Pool",
-                "Room Service",
-                "Private Beach",
-            ],
-            "tags": [
-                "business",
-                "relaxation",
-                "family",
-                "hiking",
-                "romantic",
-                "surfing",
-                "luxury",
-                "city",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00045",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Treehouse",
-            "price_per_night": 375,
-            "features": [
-                "Heating",
-                "Couple Friendly",
-                "Laundry Service",
-                "Kitchen",
-                "Gym Access",
-                "WiFi",
-                "Ocean View",
-                "Parking",
-                "Hammock",
-                "Pool",
-            ],
-            "tags": [
-                "relaxation",
-                "family",
-                "nightlife",
-                "eco-friendly",
-                "romantic",
-                "adventure",
-                "surfing",
-                "secluded",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00046",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Treehouse",
-            "price_per_night": 335,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Garden",
-                "BBQ",
-                "Kitchen",
-                "WiFi",
-                "Parking",
-                "Solar Power",
-                "Hammock",
-                "Private Beach",
-            ],
-            "tags": [
-                "relaxation",
-                "family",
-                "eco-friendly",
-                "romantic",
-                "adventure",
-                "budget",
-                "surfing",
-                "secluded",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00047",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Bed and Breakfast",
-            "price_per_night": 320,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Kitchen",
-                "Gym Access",
-                "WiFi",
-                "Pet Friendly",
-                "Parking",
-                "Breakfast Included",
-            ],
-            "tags": [
-                "business",
-                "relaxation",
-                "family",
-                "hiking",
-                "romantic",
-                "budget",
-                "wellness",
-                "surfing",
-                "luxury",
-                "beach",
-            ],
-        },
-        {
-            "property_id": "P00048",
-            "location": "Malibu, USA - Coastal, Warm",
-            "type": "Bed and Breakfast",
-            "price_per_night": 315,
-            "features": [
-                "Heating",
-                "Air Conditioning",
-                "Couple Friendly",
-                "Laundry Service",
-                "Kitchen",
-                "WiFi",
-                "Parking",
-                "Hammock",
-                "Pool",
-                "Room Service",
-            ],
-            "tags": [
-                "cultural",
-                "relaxation",
-                "family",
-                "hiking",
-                "wine country",
-                "romantic",
-                "budget",
-                "surfing",
-                "luxury",
-                "beach",
-            ],
-        },
-        {
-            "property_id": "P00049",
-            "location": "Toronto, Canada - Urban, Temperate",
-            "type": "Mountain Cabin",
-            "price_per_night": 325,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "BBQ",
-                "Kitchen",
-                "WiFi",
-                "Ocean View",
-                "Parking",
-                "Hammock",
-            ],
-            "tags": [
-                "business",
-                "cultural",
-                "nightlife",
-                "family",
-                "foodie",
-                "romantic",
-                "adventure",
-                "city",
-                "secluded",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00050",
-            "location": "Toronto, Canada - Urban, Temperate",
-            "type": "Mountain Cabin",
-            "price_per_night": 410,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Garden",
-                "Kitchen",
-                "Gym Access",
-                "Balcony",
-                "WiFi",
-                "Parking",
-                "Hot Tub",
-            ],
-            "tags": [
-                "business",
-                "cultural",
-                "nightlife",
-                "family",
-                "foodie",
-                "skiing",
-                "romantic",
-                "city",
-                "secluded",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00051",
-            "location": "Toronto, Canada - Urban, Temperate",
-            "type": "Beach Villa",
-            "price_per_night": 1020,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Garden",
-                "Kitchen",
-                "WiFi",
-                "Pet Friendly",
-                "Parking",
-                "Ocean View",
-                "Pool",
-                "Private Beach",
-            ],
-            "tags": [
-                "business",
-                "cultural",
-                "relaxation",
-                "nightlife",
-                "foodie",
-                "romantic",
-                "surfing",
-                "city",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00052",
-            "location": "Toronto, Canada - Urban, Temperate",
-            "type": "Beach Villa",
-            "price_per_night": 965,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Kitchen",
-                "Fireplace",
-                "WiFi",
-                "Parking",
-                "Solar Power",
-                "Room Service",
-            ],
-            "tags": [
-                "business",
-                "cultural",
-                "relaxation",
-                "nightlife",
-                "foodie",
-                "hiking",
-                "romantic",
-                "city",
-                "secluded",
-                "beach",
-            ],
-        },
-        {
-            "property_id": "P00053",
-            "location": "Toronto, Canada - Urban, Temperate",
-            "type": "Urban Apartment",
-            "price_per_night": 625,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Garden",
-                "Kitchen",
-                "Balcony",
-                "Fireplace",
-                "WiFi",
-                "Ocean View",
-                "Parking",
-                "Room Service",
-            ],
-            "tags": [
-                "business",
-                "cultural",
-                "nightlife",
-                "family",
-                "foodie",
-                "wellness",
-                "budget",
-                "winter",
-                "city",
-                "beach",
-            ],
-        },
-        {
-            "property_id": "P00054",
-            "location": "Toronto, Canada - Urban, Temperate",
-            "type": "Urban Apartment",
-            "price_per_night": 620,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Garden",
-                "Kitchen",
-                "Gym Access",
-                "WiFi",
-                "Ocean View",
-                "Parking",
-            ],
-            "tags": [
-                "business",
-                "cultural",
-                "nightlife",
-                "foodie",
-                "romantic",
-                "adventure",
-                "budget",
-                "city",
-                "beach",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00055",
-            "location": "Toronto, Canada - Urban, Temperate",
-            "type": "Countryside Cottage",
-            "price_per_night": 465,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Kitchen",
-                "Balcony",
-                "WiFi",
-                "Pet Friendly",
-                "Parking",
-                "Solar Power",
-            ],
-            "tags": [
-                "business",
-                "cultural",
-                "nightlife",
-                "family",
-                "foodie",
-                "romantic",
-                "luxury",
-                "city",
-                "secluded",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00056",
-            "location": "Toronto, Canada - Urban, Temperate",
-            "type": "Countryside Cottage",
-            "price_per_night": 470,
-            "features": [
-                "Heating",
-                "Air Conditioning",
-                "Couple Friendly",
-                "Laundry Service",
-                "Kitchen",
-                "Ski-in/Ski-out",
-                "WiFi",
-                "Parking",
-                "Hammock",
-                "Hot Tub",
-                "Room Service",
-            ],
-            "tags": [
-                "business",
-                "cultural",
-                "nightlife",
-                "family",
-                "foodie",
-                "romantic",
-                "wellness",
-                "city",
-                "secluded",
-                "nature",
-            ],
-        },
-        {
-            "property_id": "P00057",
-            "location": "Toronto, Canada - Urban, Temperate",
-            "type": "Ski Lodge",
-            "price_per_night": 525,
-            "features": [
-                "Heating",
-                "Laundry Service",
-                "Garden",
-                "Kitchen",
-                "Gym Access",
-                "Balcony",
-                "WiFi",
-                "Pet Friendly",
-                "Parking",
-                "Pool",
-            ],
-            "tags": [
-                "business",
-                "cultural",
-                "nightlife",
-                "foodie",
-                "skiing",
-                "adventure",
-                "wellness",
-                "winter",
-                "city",
-                "nature",
-            ],
-        },
-    ]
-
+    with open(PROPERTIES_FILE, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    properties = data.get("properties", [])
+    
     user = {
         "user_id": "u001",
-        "preferred_environment": ["Canada", "Mountain"],
+        "preferred_environment": ["Europe", "Ocean", "Luxury"],
         "budget": "500",
     }
+    
+    init_embeddings_to_sqlite()
 
     recommender = SbertRecommender(properties)
     results = recommender.recommend_logic(user, top_n=5)
