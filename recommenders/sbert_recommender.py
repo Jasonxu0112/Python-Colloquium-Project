@@ -19,8 +19,8 @@ SQLITE_DB_FILE = os.path.abspath(os.path.join(BASE_DIR, "property_vector_db.sqli
 MODEL_DIR = os.path.join(os.path.join(BASE_DIR, "sbert_models"), "saved_model")
 
 
-
 ################ PUBLIC FUNCTIONS ################
+
 
 # Check if the embeddings table already exists; if so, exit early
 def embeddings_table_exists(db_file):
@@ -44,7 +44,7 @@ def load_model(MODEL_NAME="all-MiniLM-L6-v2"):
     if os.path.exists(MODEL_DIR) and os.listdir(MODEL_DIR):
         print(f"[LOG] Load model from cache: {MODEL_DIR}")
         return SentenceTransformer(MODEL_DIR)
-    
+
     # Otherwise, download the model from Hugging Face Hub
     print(f"[LOG] Download model {MODEL_NAME} and save to cache...")
     model = SentenceTransformer(MODEL_NAME)
@@ -65,7 +65,7 @@ def init_embeddings_to_sqlite(model=None, db_file=SQLITE_DB_FILE):
     if not os.path.exists(PROPERTIES_FILE):
         raise FileNotFoundError(f"Properties file not found: {PROPERTIES_FILE}")
 
-    with open(PROPERTIES_FILE, 'r') as f:
+    with open(PROPERTIES_FILE, "r") as f:
         data = json.load(f)
     properties = data.get("properties", [])
     if not properties:
@@ -77,14 +77,14 @@ def init_embeddings_to_sqlite(model=None, db_file=SQLITE_DB_FILE):
     add_properties(properties, model, db_file)
 
 
-
 def ensure_table(conn):
     """
     Ensure the property_embeddings table exists in the SQLite database.
     Otherwise, create it.
     """
     c = conn.cursor()
-    c.execute("""
+    c.execute(
+        """
         CREATE TABLE IF NOT EXISTS property_embeddings (
             property_id TEXT PRIMARY KEY,
             embedding   BLOB,
@@ -93,21 +93,18 @@ def ensure_table(conn):
             features    TEXT,
             tags        TEXT
         )
-    """)
+    """
+    )
     conn.commit()
 
 
 def add_properties(new_props, model, db_file=SQLITE_DB_FILE):
     """
-    通用增量写入：
-      - 支持传入 单条 dict 或 多条 list[dict]/iterable
-      - 批量 encode，单次事务写入（更高效）
-      - INSERT OR REPLACE：同一个 property_id 视为更新
-      
+    Generic function to add new properties (or single property) to the SQLite database.
     new_prop: dict, e.g. {"property_id": "P100", "location": "Toronto", "type": "Apartment", ...}
-    返回：成功写入/更新的条数
+    return: number of records added
     """
-    # 1. 统一成列表
+    # 1. Generalize new_props to a list of dicts
     if isinstance(new_props, dict):
         # Single property dict
         new_props = [new_props]
@@ -119,11 +116,11 @@ def add_properties(new_props, model, db_file=SQLITE_DB_FILE):
 
     # 2. Batch create embeddings
     texts = [compose_property_text(p) for p in new_props]
-    
-    # use convert_to_numpy=True to get numpy array directly, convert to float32 for SQLite BLOB storage 
+
+    # use convert_to_numpy=True to get numpy array directly, convert to float32 for SQLite BLOB storage
     # otherwise it will be torch.Tensor (which is not serializable)
     embs = model.encode(texts, convert_to_numpy=True).astype(np.float32)
-    
+
     # 3. Create rows_data
     rows_data = [
         (
@@ -136,22 +133,24 @@ def add_properties(new_props, model, db_file=SQLITE_DB_FILE):
         )
         for p, emb in zip(new_props, embs)
     ]
-    
+
     # 4. Batch insert into database
     conn = sqlite3.connect(db_file)
     ensure_table(conn)
-    conn.executemany("""
+    conn.executemany(
+        """
         INSERT OR REPLACE INTO property_embeddings
         (property_id, embedding, location, type, features, tags)
         VALUES (?, ?, ?, ?, ?, ?)
-    """, rows_data)
+    """,
+        rows_data,
+    )
     conn.commit()
     conn.close()
 
     print(f"[LOG] Upserted {len(rows_data)} record(s) into {db_file}.")
     return len(rows_data)
-    
-    
+
 
 def compose_property_text(property):
     """
@@ -160,7 +159,9 @@ def compose_property_text(property):
     """
     location = str(property.get("location", "")).strip()
     type_ = str(property.get("type", "")).strip()
-    features = property.get("features") if isinstance(property.get("features"), list) else []
+    features = (
+        property.get("features") if isinstance(property.get("features"), list) else []
+    )
     tags = property.get("tags") if isinstance(property.get("tags"), list) else []
 
     string = []
@@ -176,15 +177,13 @@ def compose_property_text(property):
     return " ; ".join(string)
 
 
-
-
-
 ################# SBERT RECOMMENDER CLASS ################
 class SbertRecommender:
     """
     Doc Reference: https://sbert.net/examples/sentence_transformer/applications/computing-embeddings/README.html
     Video Reference: https://www.youtube.com/watch?app=desktop&v=nZ5j289WN8g
-"""
+    """
+
     def __init__(self, properties):
         """
         Initialize the SBERT model, and load properties.
@@ -230,22 +229,18 @@ class SbertRecommender:
         for i, prop in enumerate(self.properties):
             if float(prop.get("price_per_night")) <= user_budget:
                 mask_i.append(i)
-        # print(mask_i)
 
         user_vector = self.embed_to_vector([user_text])[0]
 
         filtered_property_vector = self.property_vectors[mask_i]
-        # print(filtered_property_vector.shape)
-        
+
         similarities = util.cos_sim(user_vector, filtered_property_vector)[0]
-        # print(f"similarities: {similarities}")
 
         num_properties = len(filtered_property_vector)
         top_n = min(top_n, num_properties)
 
         order_on_mask_i = np.argsort(-similarities)[:top_n]
         # example output: [2, 3, 1, 0], which shows the rank order based on the filtered vector (mask)
-        # print(f"order based on the mask: {order_on_mask_i}")
 
         results = []
         for i in order_on_mask_i:
@@ -261,18 +256,18 @@ class SbertRecommender:
         return results
 
 
-# ======== Examples ============
+################## Examples ################
 if __name__ == "__main__":
-    with open(PROPERTIES_FILE, 'r', encoding='utf-8') as f:
+    with open(PROPERTIES_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
     properties = data.get("properties", [])
-    
+
     user = {
         "user_id": "u001",
         "preferred_environment": ["Europe", "Ocean", "Luxury"],
         "budget": "500",
     }
-    
+
     init_embeddings_to_sqlite()
 
     recommender = SbertRecommender(properties)
