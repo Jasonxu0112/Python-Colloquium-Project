@@ -62,5 +62,18 @@
         ],
         "budget": "120",
         "password": "ba78ef1b08582a45a66dbd906122435202ae9744604a23a9124d5fe761b062e6"
+    },
+    {
+        "user_id": "Kyrie63",
+        "name": "Ziyi Xu",
+        "group_size": "5",
+        "preferred_environment": [
+            "Toronto",
+            "Water",
+            "Warm",
+            "Friendly"
+        ],
+        "budget": "1600",
+        "password": "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3"
     }
 ]
