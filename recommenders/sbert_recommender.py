@@ -207,7 +207,7 @@ class SbertRecommender:
         """
         Compose user preferred environment to a structured text for embedding (vectorization)
         """
-        preferred_env = user.get("preferred_environment") or []
+        preferred_env = user.preferred_environment or []
         return "preferred_environment: " + ", ".join(preferred_env)
 
     def embed_to_vector(self, texts):
@@ -222,7 +222,7 @@ class SbertRecommender:
         """
         user_text = self.compose_user_text(user)
 
-        user_budget = float(user.get("budget").strip())
+        user_budget = float(user.budget)
 
         # Filter all properties that is under the budget
         mask_i = []

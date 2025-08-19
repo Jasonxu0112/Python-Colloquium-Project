@@ -1,19 +1,22 @@
+import hashlib
+
 class User:
-    def __init__(self, user_id, name, group_size, preferred_environment, budget):
-        self._user_id = user_id
+    def __init__(self, user_id, name, group_size, preferred_environment, budget, password_hash=None):
+        self._user_id = user_id.lower().strip()  # Normalize user_id to lowercase and strip whitespace
         self._name = name
         self._group_size = group_size
         self._preferred_environment = preferred_environment
         self._budget = budget
+        self._password_hash = password_hash
 
-    # Getter & Setter for user_id
+    # Getter for user_id
     @property
     def user_id(self):
-        return self._user_id
+        return self._user_id.lower().strip() 
 
-    @user_id.setter
-    def user_id(self, user_id):
-        self._user_id = user_id
+    # @user_id.setter
+    # def user_id(self, user_id):
+    #     self._user_id = user_id
 
     # Getter & Setter for name
     @property
@@ -22,7 +25,7 @@ class User:
 
     @name.setter
     def name(self, name):
-        self._name = name
+        self._name = str(name)
 
     # Getter & Setter for group_size
     @property
@@ -31,9 +34,10 @@ class User:
 
     @group_size.setter
     def group_size(self, group_size):
-        if group_size <= 0:
-            raise ValueError("Group size must be positive.")
-        self._group_size = group_size
+        try:
+            self._group_size = int(group_size)
+        except (TypeError, ValueError):
+            raise ValueError("Group size must be an integer")
 
     # Getter & Setter for preferred_environment
     @property
@@ -53,15 +57,50 @@ class User:
 
     @budget.setter
     def budget(self, budget):
+        budget = float(budget)
         if budget < 0:
             raise ValueError("Budget cannot be negative.")
         self._budget = budget
 
-
-    def match_property_listing(self, property_listing):
-        if self.budget >= property_listing.price_per_night:
-            return True
-        return False
+    # Getter & Setter for password_hash
+    @property   
+    def password_hash(self):
+        return self._password_hash
     
-
+    # def set_password(self, raw_password):
+    #     self._password_hash = hashlib.sha256(raw_password.encode()).hexdigest()
     
+    def verify_password(self, raw_password):
+        if not self._password_hash:
+            return False
+        return self._password_hash == hashlib.sha256(raw_password.encode()).hexdigest()
+
+
+    def to_dict(self):
+        """ Convert User instance to a dictionary
+        """
+        return {
+            "user_id": self._user_id,
+            "name": self._name,
+            "group_size": self._group_size,
+            "preferred_environment": self._preferred_environment,
+            "budget": self._budget,
+            "password_hash": self._password_hash,  
+        }
+        
+    @classmethod
+    def from_dict(cls, data):
+        """ Create a User instance from a dictionary
+        """
+        return cls(
+            user_id=data.get("user_id"),
+            name=data.get("name"),
+            group_size=data.get("group_size", 1),
+            preferred_environment=data.get("preferred_environment", []),
+            budget=data.get("budget", 0.0),
+            password_hash=data.get("password_hash")
+        )
+        
+    def __repr__(self):
+        return f"User(user_id={self._user_id}, name={self._name}, group_size={self._group_size}, preferred_environment={self._preferred_environment}, budget={self._budget})"
+        
