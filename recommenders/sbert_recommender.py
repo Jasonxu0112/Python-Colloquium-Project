@@ -248,9 +248,12 @@ class SbertRecommender:
             results.append(
                 {
                     "property_id": self.properties[idx]["property_id"],
-                    "similarities": float(similarities[i]),
+                    "similarity": float(similarities[i]),
                     "price_per_night": self.properties[idx]["price_per_night"],
-                    "text": self.property_texts[idx],
+                    "location": self.properties[idx]["location"],
+                    "type": self.properties[idx]["type"],
+                    "features": self.properties[idx]["features"],
+                    "tags": self.properties[idx]["tags"],   
                 }
             )
         return results
