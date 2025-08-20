@@ -1,49 +1,27 @@
-# --- Embedding DB Check and Creation ---
-def ensure_embeddings_db():
-    import os, sqlite3
-    db_file = os.path.abspath(os.path.join(os.path.dirname(__file__), 'Vector embeddings', 'property_vector_db.sqlite'))
-    print(f"[LOG] Checking for embeddings DB at: {db_file}")
-    if not os.path.exists(db_file):
-        print("[LOG] Embeddings DB not found. Creating embeddings...")
-        run_create_embeddings()
-        return
-    # Check if table exists
-    conn = sqlite3.connect(db_file)
-    c = conn.cursor()
-    print("[LOG] Checking for property_embeddings table in DB...")
-    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='property_embeddings'")
-    exists = c.fetchone()
-    conn.close()
-    if not exists:
-        print("[LOG] Embeddings table not found. Creating embeddings...")
-        run_create_embeddings()
-    else:
-        print("[LOG] Embeddings DB and table found. Ready to use.")
-
-# --- Run create_embeddings.py as a subprocess ---
-def run_create_embeddings():
-    import subprocess, sys
-    script_path = os.path.abspath(os.path.join(os.path.dirname(__file__), 'Vector embeddings', 'create_embeddings.py'))
-    print(f"[LOG] Running embedding creation script: {script_path}")
-    result = subprocess.run([sys.executable, script_path], capture_output=True, text=True)
-    print("[LOG] Embedding script stdout:")
-    print(result.stdout)
-    if result.returncode != 0:
-        print("[LOG] Error creating embeddings:", result.stderr)
-        print("[LOG] Embedding creation script failed, but continuing to main logic.")
-    else:
-        print("[LOG] Embedding creation completed successfully or skipped (table exists). Continuing to main logic.")
-
 # main.py
 # Entry point for the property listing application.
 # Provides a simple CLI for user login and sign up.
+
+from recommenders.sbert_recommender import SbertRecommender
+from models.users import User
 
 import json
 import hashlib
 import os
 
+BASE_DIR = os.path.dirname(__file__)
+
 # Path to the users JSON file
-USERS_FILE = './datasets/users.json'  # Change this path if your file is elsewhere
+USERS_FILE = os.path.abspath(
+    os.path.join(BASE_DIR, "datasets", "users.json")
+)  # Change this path if your file is elsewhere
+
+# Path to the property listings JSON file (robust to script location)
+PROPERTIES_FILE = os.path.abspath(
+    os.path.join(BASE_DIR, "datasets", "property_listings.json")
+)
+
+_RECOMMENDER = None  # Placeholder for the recommender instance
 
 def load_users(users_file):
     """
@@ -57,22 +35,47 @@ def load_users(users_file):
             return json.load(f)
         except json.JSONDecodeError:
             return []
+        
+def save_users(users, users_file):
+    """
+    Save users to a JSON file.
+    user: user dictionaries.
+    """
+    with open(users_file, 'w') as f:
+        json.dump([u for u in users], f, indent=4)
+        
+def ensure_user(user_id, users):
+    """
+    Ensure a user exists in the users list by user_id.
+    """
+    for u in users:
+        if isinstance(u, User):
+            if u.user_id == user_id:
+                return u
+        elif isinstance(u, dict):
+            if u.get("user_id") == user_id:
+                return User.from_dict(u)
+    return None
 
-def login(user_id, password, users):
+def login(user, raw_password, users, max_attempts=3):
     """
-    Authenticate a user by user_id and password.
-    Returns a success or error message.
+    Handle user login.
     """
-    hashed_input = hashlib.sha256(password.encode()).hexdigest()
-    for user in users:
-        if user["user_id"] == user_id:
-            if user["password"] == hashed_input:
-                print(f"✅ Login successful! Welcome {user['name']}.")
-                login_menu(user_id, users)
-            else:
-                print("❌ Incorrect password.")
+    while max_attempts > 0:
+        # hashed_input = hashlib.sha256(password.encode()).hexdigest()
+        
+        if user.verify_password(raw_password):
+            print(f"✅ Login successful! Welcome {user.name}.")
+            login_menu(user, users)
             return
-    print("❌ User ID not found.")
+        else:
+            max_attempts -= 1
+            if max_attempts > 0:
+                print(f"❌ Incorrect password. You have {max_attempts} attempts left.")
+                raw_password = input("Please enter your password again: ")
+            else:
+                print("❌ Too many failed attempts. Please try again later.")
+                return
     main_menu()
         
 def sign_up():
@@ -85,8 +88,8 @@ def sign_up():
     print("      SIGN UP")
     print("="*30)
     
-    user_id = input("Enter User ID: ")
-    if any(user["user_id"] == user_id for user in users):
+    user_id = input("Enter User ID: ").lower().strip()
+    if ensure_user(user_id, users):
         print("❌ User ID already exists. Please try a different one.")
         return
     
@@ -96,7 +99,7 @@ def sign_up():
     preferred_environment = [pref.strip() for pref in pref_input.split(',') if pref.strip()]
     budget = input("Enter Budget: ")
     
-    password = input("Create Password: ")
+    password = input("Create Password: ").strip()
     hashed_password = hashlib.sha256(password.encode()).hexdigest()
     
     new_user = {
@@ -105,18 +108,17 @@ def sign_up():
         "group_size": group_size,
         "preferred_environment": preferred_environment,
         "budget": budget,
-        "password": hashed_password
+        "password_hash": hashed_password
     }
     
     users.append(new_user)
     
     # Write the updated users list back to the JSON file
-    with open(USERS_FILE, 'w') as f:
-        json.dump(users, f, indent=4)
+    save_users(users, USERS_FILE)
     
     print(f"✅ Sign up successful! Welcome {name}. You can now log in.")
 
-def login_menu(user_id, users):
+def login_menu(user, users):
     print("\n" + "="*30)
     print("      USER DASHBOARD")
     print("="*30)
@@ -126,45 +128,63 @@ def login_menu(user_id, users):
     print("="*30)
     choice = input("Enter your choice: ")
     if choice == '1':
-        manage_user_profile(user_id, users)
+        manage_user_profile(user, users)
     elif choice == '2':
-        property_listings_menu(user_id, users)
+        property_listings_menu(user, users)
     elif choice == '3':
         main_menu()
     else:
         print("Invalid choice. Please try again.")
-        login_menu(user_id, users)
+        login_menu(user, users)
+        
+
+def get_recommender():
+    """
+    Initialize and return the SbertRecommender instance. (LAZY LOADING)
+    This function ensures that the recommender is only created once.
+    """
+    global _RECOMMENDER
+    if _RECOMMENDER is None:
+        with open(PROPERTIES_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        properties = data.get("properties", [])
+        _RECOMMENDER = SbertRecommender(properties)
+    return _RECOMMENDER
 
 # --- Property Listings Menu ---
-def property_listings_menu(user_id, users):
-    ensure_embeddings_db()
+def property_listings_menu(user, users):
+    
+    recommender = get_recommender() # Lazy load the recommender
+    top_n=5
+    
     print("\n" + "-"*30)
     print("   PROPERTY LISTINGS")
     print("-"*30)
     print("1. Get recommended options according to your preferences")
     print("2. Chat with the AI travel agent to plan your vacation")
+    print("3. Back")
     print("-"*30)
     choice = input("Enter your choice: ")
     if choice == '1':
-        user = next((u for u in users if u["user_id"] == user_id), None)
         if user:
-            recommended_properties = recommend_properties_by_preferences(user)
+            recommended_properties = recommender.recommend_logic(user, top_n)
             show_properties_with_descriptions(recommended_properties, user)
             print("\nNow starting chat with the AI travel agent...\n")
-            travel_agent_chat(user, recommended_properties)
+            travel_agent_chat(user, user, recommended_properties)
         else:
             print("User not found.")
     elif choice == '2':
-        user = next((u for u in users if u["user_id"] == user_id), None)
         if user:
-            travel_agent_chat(user)
+            travel_agent_chat(user, users)
         else:
             print("User not found.")
+    elif choice == '3':
+        login_menu(user, users)
     else:
         print("Invalid choice.")
-        property_listings_menu(user_id, users)
+        property_listings_menu(user, users)
 
-# --- Vector Search Recommendation Logic ---
+# --- Vector Search Recommendation Logic (Deprecated)---
 def recommend_properties_by_preferences(user, top_k=3):
     import sys, importlib.util, os
     embeddings_path = os.path.abspath(os.path.join(os.path.dirname(__file__), 'Vector embeddings', 'create_embeddings.py'))
@@ -250,29 +270,15 @@ def generate_property_description(property_data, user):
         desc = ' '.join(words[:40]) + '...'
     return desc
     
-    def generate_property_description(property_data, user):
-        # Short, concise description (30-40 words max)
-        features = ', '.join(property_data['features'][:4])
-        tags = ', '.join(property_data['tags'][:3])
-        desc = (
-            f"A {property_data['type']} in {property_data['location']} with {features}. "
-            f"Great for {tags}. "
-            f"Enjoy comfort and adventure at ${property_data.get('price', 'your budget')} per night."
-        )
-        # Ensure description is about 30-40 words
-        words = desc.split()
-        if len(words) > 40:
-            desc = ' '.join(words[:40]) + '...'
-        return desc
-
+    
 # --- AI Travel Agent Chat ---
-def travel_agent_chat(user, recommended_properties=None):
+def travel_agent_chat(user, users, recommended_properties=None):
     print("\n--- Welcome to the AI Travel Agent! ---")
     print("Type 'exit' to end the chat.")
     chat_history = []
     # Prepare context string for the LLM
     if recommended_properties:
-        context_str = "Here are 3 recommended properties for the user: "
+        context_str = f"Here are {len(recommended_properties)} recommended properties for the user: "
         for idx, prop in enumerate(recommended_properties, 1):
             context_str += f"\nProperty #{idx}: ID: {prop['property_id']}, Location: {prop['location']}, Type: {prop['type']}, Features: {prop['features']}, Tags: {prop['tags']}"
     else:
@@ -282,7 +288,10 @@ def travel_agent_chat(user, recommended_properties=None):
         user_input = input("\033[96mYou:\033[0m ")  # Cyan for user
         if user_input.lower() == 'exit':
             print("\033[92mAI: Have a great trip! Goodbye!\033[0m")  # Green for AI
-            break
+            login_menu(user, users)
+            return
+        
+        # [TODO: Have not check if the recommended logic works with the chat agent]
         # Check if user refers to a recommended property by ID
         found = False
         matched_prop = None
@@ -398,7 +407,7 @@ def ask_itenary_preferences():
     else:
         print("AI: No problem! Let me know if you need anything else.")
 
-def manage_user_profile(user_id, users):
+def manage_user_profile(user, users):
     print("\n" + "-"*30)
     print("   MANAGE USER PROFILE")
     print("-"*30)
@@ -409,102 +418,120 @@ def manage_user_profile(user_id, users):
     print("-"*30)
     choice = input("Enter your choice: ")
     if choice == '1':
-        view_user_profile(user_id, users)
-        manage_user_profile(user_id, users)
+        view_user_profile(user, users)
+        manage_user_profile(user, users)
     elif choice == '2':
-        edit_user_profile(user_id, users)
-        manage_user_profile(user_id, users)
+        edit_user_profile(user, users)
+        manage_user_profile(user, users)
     elif choice == '3':
-        delete_user_profile(user_id, users)
+        delete_user_profile(user, users)
         main_menu()
     elif choice == '4':
-        login_menu(user_id, users)
+        login_menu(user, users)
     else:
         print("Invalid choice.")
-        manage_user_profile(user_id, users)
+        manage_user_profile(user, users)
 
-def view_user_profile(user_id, users):
+def view_user_profile(user, users):
     """
     Display the user's profile information.
     """
-    for user in users:
-        if user["user_id"] == user_id:
-            print("\n" + "*"*30)
-            print("      USER PROFILE")
-            print("*"*30)
-            print(f"User ID:              {user['user_id']}")
-            print(f"Name:                 {user['name']}")
-            print(f"Group Size:           {user['group_size']}")
-            print(f"Preferred Environment:{user['preferred_environment']}")
-            print(f"Budget:               {user['budget']}")
-            print("*"*30 + "\n")
-            return
+    print("\n" + "*"*30)
+    print("      USER PROFILE")
+    print("*"*30)
+    print(f"User ID:              {user.user_id}")
+    print(f"Name:                 {user.name}")
+    print(f"Group Size:           {user.group_size}")
+    print(f"Preferred Environment:{', '.join(user.preferred_environment)}")
+    print(f"Budget:               {user.budget}")
+    print("*"*30 + "\n")
 
-def edit_user_profile(user_id, users):
+def edit_user_profile(user, users):
     """
     Edit the user's profile information.
     """
-    for user in users:
-        if user["user_id"] == user_id:
-            print("\n" + "-"*30)
-            print("      EDIT PROFILE")
-            print("-"*30)
-            name = input(f"Name ({user['name']}): ") or user['name']
-            group_size = input(f"Group Size ({user['group_size']}): ") or user['group_size']
-            pref_input = input(f"Preferred Environment(s) (comma-separated) ({user['preferred_environment']}): ")
-            if pref_input:
-                # Split by comma, strip whitespace, and filter out empty strings
-                preferred_environment = [pref.strip() for pref in pref_input.split(',') if pref.strip()]
-            else:
-                preferred_environment = user['preferred_environment']
-            budget = input(f"Budget ({user['budget']}): ") or user['budget']
-            user.update({
-                "name": name,
-                "group_size": group_size,
-                "preferred_environment": preferred_environment,
-                "budget": budget
-            })
-            # Write the updated users list back to the JSON file
-            with open(USERS_FILE, 'w') as f:
-                json.dump(users, f, indent=4)
-            print("\nProfile updated successfully.\n")
-            return
+    print("\n" + "-"*30)
+    print("      EDIT PROFILE")
+    print("-"*30)
+    name = input(f"Name ({user.name}): ") or user.name
+    
+    group_input = input(f"Group Size ({user.group_size}): ")
+    group_size = group_input or user.group_size
+    
+    pref_input = input(f"Preferred Environment(s) (comma-separated) ({user.preferred_environment}): ")
+    if pref_input:
+        # Split by comma, strip whitespace, and filter out empty strings
+        preferred_environment = [pref.strip() for pref in pref_input.split(',') if pref.strip()]
+    else:
+        preferred_environment = user.preferred_environment
+        
+    budget_input = input(f"Budget ({user.budget}): ")
+    budget = budget_input or user.budget
+    
+    # Update the user object
+    user.name = name
+    user.group_size = group_size
+    user.preferred_environment = preferred_environment
+    user.budget = budget
+    
+    for i, u in enumerate(users):
+        if u.get("user_id") == user.user_id:
+            users[i] = user.to_dict()
+            break
 
-def delete_user_profile(user_id, users):
+    # Write the updated users list back to the JSON file
+    save_users(users, USERS_FILE)
+    print("\nProfile updated successfully.\n")
+
+def delete_user_profile(user, users):
     """
     Delete the user's profile.
     """
-    for user in users:
-        if user["user_id"] == user_id:
-            users.remove(user)
-            # Write the updated users list back to the JSON file
-            with open(USERS_FILE, 'w') as f:
-                json.dump(users, f, indent=4)
-            print("\nProfile deleted successfully.\n")
+    confirm = input(f"⚠️ Are you sure you want to delete profile for {user.name}? (y/n): ").strip().lower()
+    if confirm != "y":
+        print("❎ Deletion cancelled.")
+        return
+
+    for u in users:
+        if u.get("user_id") == user.user_id:
+            users.remove(u)
+            save_users(users, USERS_FILE)   
+            print(f"\n✅ Profile for {user.name} deleted successfully.\n")
             return
+    
 
 def main_menu():
     """
     Display the main menu and handle user input for login or sign up.
     """
-    print("\n" + "="*30)
-    print("   PROPERTY LISTING APP")
-    print("="*30)
-    print("1. Login")
-    print("2. Sign Up")
-    print("="*30)
-    choice = input("Enter your choice: ")
-    if choice == '1':
-        users = load_users(USERS_FILE)
-        entered_user_id = input("Enter User ID: ")
-        entered_password = input("Enter Password: ")
-        login(entered_user_id, entered_password, users)
-    elif choice == '2':
-        sign_up()
-        main_menu()
-    else:
-        print("Invalid choice. Please try again.")
-        main_menu()
+    while True:
+        print("\n" + "="*30)
+        print("   PROPERTY LISTING APP")
+        print("="*30)
+        print("1. Login")
+        print("2. Sign Up")
+        print("3. Exit")
+        print("="*30)
+        choice = input("Enter your choice: ")
+        
+        if choice == '1':
+            users = load_users(USERS_FILE)
+            entered_user_id = input("Enter User ID: ").lower().strip()
+            user = ensure_user(entered_user_id, users)
+            if not user:
+                print("❌ User ID not found. Please sign up first!")
+                continue
+            entered_password = input("Enter Password: ").strip()
+            login(user, entered_password, users)
+
+        elif choice == '2':
+            sign_up()
+        elif choice == '3':
+            print("Thank you for choosing our app! See you again!")
+            break
+        else:
+            print("Invalid choice. Please try again.")
+
 
 
 if __name__ == "__main__":
