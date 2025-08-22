@@ -2,15 +2,20 @@
     {
         "user_id": "manav_01",
         "name": "Manav",
-        "group_size": "3",
+        "group_size": 4,
         "preferred_environment": [
             "Mountain Cabin",
             "Cozy Huts",
             "Forest",
             "Mangroove Forest"
         ],
-        "budget": "200",
-        "password": "77981306d2e60bcff5e16d2b693d322cd25833d03a548134f20d5cd113f14cbc"
+        "budget": 250,
+        "password": "77981306d2e60bcff5e16d2b693d322cd25833d03a548134f20d5cd113f14cbc",
+        "saved_property": [
+            "P00001",
+            "P00005",
+            "P00004"
+        ]
     },
     {
         "user_id": "sunny_02",
@@ -83,5 +88,39 @@
         ],
         "budget": "100",
         "password": "88d4266fd4e6338d13b845fcf289579d209c897823b9217da3e161936f031589"
+    },
+    {
+        "user_id": "807782352",
+        "name": "kyrie",
+        "group_size": "5",
+        "preferred_environment": [
+            "toronto",
+            "warm",
+            "beach"
+        ],
+        "budget": "600",
+        "password": "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3"
+    },
+    {
+        "user_id": "0112",
+        "name": "Jason Xu",
+        "group_size": "5",
+        "preferred_environment": [
+            "Sea view"
+        ],
+        "budget": "300",
+        "password": "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92"
+    },
+    {
+        "user_id": "manav_81",
+        "name": "Manav",
+        "group_size": 3,
+        "preferred_environment": [
+            "cozy",
+            "summer stay",
+            "hut"
+        ],
+        "budget": 130,
+        "password": "77981306d2e60bcff5e16d2b693d322cd25833d03a548134f20d5cd113f14cbc"
     }
 ]

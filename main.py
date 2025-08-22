@@ -34,71 +34,43 @@ def run_create_embeddings():
     else:
         print("[LOG] Embedding creation completed successfully or skipped (table exists). Continuing to main logic.")
 
+
 # main.py
-# Entry point for the property listing application.
-# Provides a simple CLI for user login and sign up.
+# Unified launcher for CLI and UI (Streamlit) modes, using shared core.py logic.
 
-import json
-import hashlib
 import os
+import sys
+import hashlib
+import core
 
-# Path to the users JSON file
-USERS_FILE = './datasets/users.json'  # Change this path if your file is elsewhere
+def cli_login():
+    users = core.load_users()
+    user_id = input("Enter User ID: ")
+    password = input("Enter Password: ")
+    user = core.authenticate(user_id, password)
+    if user:
+        print(f"✅ Login successful! Welcome {user['name']}.")
+        login_menu(user)
+    else:
+        print("❌ Invalid credentials.")
+        main_menu()
 
-def load_users(users_file):
-    """
-    Load users from a JSON file.
-    Returns a list of user dictionaries.
-    """
-    if not os.path.exists(users_file):
-        return []
-    with open(users_file, 'r') as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            return []
-
-def login(user_id, password, users):
-    """
-    Authenticate a user by user_id and password.
-    Returns a success or error message.
-    """
-    hashed_input = hashlib.sha256(password.encode()).hexdigest()
-    for user in users:
-        if user["user_id"] == user_id:
-            if user["password"] == hashed_input:
-                print(f"✅ Login successful! Welcome {user['name']}.")
-                login_menu(user_id, users)
-            else:
-                print("❌ Incorrect password.")
-            return
-    print("❌ User ID not found.")
-    main_menu()
-        
-def sign_up():
-    """
-    Handle user sign up.
-    Prompts for user details and saves them to the users JSON file.
-    """
-    users = load_users(USERS_FILE)
+def cli_sign_up():
     print("\n" + "="*30)
     print("      SIGN UP")
     print("="*30)
-    
     user_id = input("Enter User ID: ")
+    users = core.load_users()
     if any(user["user_id"] == user_id for user in users):
         print("❌ User ID already exists. Please try a different one.")
         return
-    
     name = input("Enter Name: ")
     group_size = input("Enter Group Size: ")
     pref_input = input("Enter Preferred Environment(s) (comma-separated): ")
     preferred_environment = [pref.strip() for pref in pref_input.split(',') if pref.strip()]
     budget = input("Enter Budget: ")
-    
     password = input("Create Password: ")
     hashed_password = hashlib.sha256(password.encode()).hexdigest()
-    
     new_user = {
         "user_id": user_id,
         "name": name,
@@ -107,36 +79,34 @@ def sign_up():
         "budget": budget,
         "password": hashed_password
     }
-    
-    users.append(new_user)
-    
-    # Write the updated users list back to the JSON file
-    with open(USERS_FILE, 'w') as f:
-        json.dump(users, f, indent=4)
-    
+    core.add_user(new_user)
     print(f"✅ Sign up successful! Welcome {name}. You can now log in.")
 
-def login_menu(user_id, users):
-    print("\n" + "="*30)
-    print("      USER DASHBOARD")
-    print("="*30)
-    print("1. View User Profile")
-    print("2. View Property Listings")
-    print("3. Logout")
-    print("="*30)
-    choice = input("Enter your choice: ")
-    if choice == '1':
-        manage_user_profile(user_id, users)
-    elif choice == '2':
-        property_listings_menu(user_id, users)
-    elif choice == '3':
-        main_menu()
-    else:
-        print("Invalid choice. Please try again.")
-        login_menu(user_id, users)
+def login_menu(user):
+    while True:
+        print("\n" + "="*30)
+        print("      USER DASHBOARD")
+        print("="*30)
+        print("1. View User Profile")
+        print("2. View Property Listings")
+        print("3. View Saved Properties")
+        print("4. Logout")
+        print("="*30)
+        choice = input("Enter your choice: ")
+        if choice == '1':
+            view_user_profile(user)
+        elif choice == '2':
+            property_listings_menu(user)
+        elif choice == '3':
+            show_saved_properties(user)
+        elif choice == '4':
+            print("Logging out...")
+            break
+        else:
+            print("Invalid choice. Please try again.")
 
 # --- Property Listings Menu ---
-def property_listings_menu(user_id, users):
+def property_listings_menu(user):
     ensure_embeddings_db()
     print("\n" + "-"*30)
     print("   PROPERTY LISTINGS")
@@ -146,23 +116,15 @@ def property_listings_menu(user_id, users):
     print("-"*30)
     choice = input("Enter your choice: ")
     if choice == '1':
-        user = next((u for u in users if u["user_id"] == user_id), None)
-        if user:
-            recommended_properties = recommend_properties_by_preferences(user)
-            show_properties_with_descriptions(recommended_properties, user)
-            print("\nNow starting chat with the AI travel agent...\n")
-            travel_agent_chat(user, recommended_properties)
-        else:
-            print("User not found.")
+        recommended_properties = recommend_properties_by_preferences(user)
+        show_properties_with_descriptions(recommended_properties, user)
+        print("\nNow starting chat with the AI travel agent...\n")
+        travel_agent_chat(user, recommended_properties)
     elif choice == '2':
-        user = next((u for u in users if u["user_id"] == user_id), None)
-        if user:
-            travel_agent_chat(user)
-        else:
-            print("User not found.")
+        travel_agent_chat(user)
     else:
         print("Invalid choice.")
-        property_listings_menu(user_id, users)
+        property_listings_menu(user)
 
 # --- Vector Search Recommendation Logic ---
 def recommend_properties_by_preferences(user, top_k=3):
@@ -398,47 +360,30 @@ def ask_itenary_preferences():
     else:
         print("AI: No problem! Let me know if you need anything else.")
 
-def manage_user_profile(user_id, users):
-    print("\n" + "-"*30)
-    print("   MANAGE USER PROFILE")
-    print("-"*30)
-    print("1. View Profile")
-    print("2. Edit Profile")
-    print("3. Delete Profile")
-    print("4. Back to Main Menu")
-    print("-"*30)
-    choice = input("Enter your choice: ")
-    if choice == '1':
-        view_user_profile(user_id, users)
-        manage_user_profile(user_id, users)
-    elif choice == '2':
-        edit_user_profile(user_id, users)
-        manage_user_profile(user_id, users)
-    elif choice == '3':
-        delete_user_profile(user_id, users)
-        main_menu()
-    elif choice == '4':
-        login_menu(user_id, users)
-    else:
-        print("Invalid choice.")
-        manage_user_profile(user_id, users)
+def view_user_profile(user):
+    print("\n" + "*"*30)
+    print("      USER PROFILE")
+    print("*"*30)
+    print(f"User ID:              {user['user_id']}")
+    print(f"Name:                 {user['name']}")
+    print(f"Group Size:           {user['group_size']}")
+    print(f"Preferred Environment:{user['preferred_environment']}")
+    print(f"Budget:               {user['budget']}")
+    print("*"*30 + "\n")
 
-def view_user_profile(user_id, users):
-    """
-    Display the user's profile information.
-    """
-    for user in users:
-        if user["user_id"] == user_id:
-            print("\n" + "*"*30)
-            print("      USER PROFILE")
-            print("*"*30)
-            print(f"User ID:              {user['user_id']}")
-            print(f"Name:                 {user['name']}")
-            print(f"Group Size:           {user['group_size']}")
-            print(f"Preferred Environment:{user['preferred_environment']}")
-            print(f"Budget:               {user['budget']}")
-            print("*"*30 + "\n")
-            return
+def show_saved_properties(user):
+    saved = core.get_saved_properties(user['user_id'])
+    if not saved:
+        print("No properties saved yet.")
+    for prop in saved:
+        print(f"{prop['type']} in {prop['location']} (ID: {prop['property_id']})")
+        print(f"  Price per night: ${prop['price_per_night']}")
+        print(f"  Features: {', '.join(prop['features'])}")
+        print(f"  Tags: {', '.join(prop['tags'])}")
+        print(f"  Booked Dates: {', '.join(prop.get('booked_dates', []))}")
+        print(f"  Coordinates: {prop['coordinates']}")
+        print()
+
 
 def edit_user_profile(user_id, users):
     """
@@ -483,32 +428,55 @@ def delete_user_profile(user_id, users):
             print("\nProfile deleted successfully.\n")
             return
 
+
 def main_menu():
-    """
-    Display the main menu and handle user input for login or sign up.
-    """
     print("\n" + "="*30)
     print("   PROPERTY LISTING APP")
     print("="*30)
     print("1. Login")
     print("2. Sign Up")
+    print("3. Exit")
     print("="*30)
     choice = input("Enter your choice: ")
     if choice == '1':
-        users = load_users(USERS_FILE)
-        entered_user_id = input("Enter User ID: ")
-        entered_password = input("Enter Password: ")
-        login(entered_user_id, entered_password, users)
+        cli_login()
     elif choice == '2':
-        sign_up()
+        cli_sign_up()
         main_menu()
+    elif choice == '3':
+        print("Goodbye!")
+        sys.exit(0)
     else:
         print("Invalid choice. Please try again.")
         main_menu()
 
 
+
+def launcher():
+    print("\n" + "="*40)
+    print("Welcome to Gr8 Summer Stays!")
+    print("="*40)
+    print("1. Launch CLI")
+    print("2. Launch UI (Streamlit)")
+    print("3. Exit")
+    print("="*40)
+    choice = input("Enter your choice: ")
+    if choice == '1':
+        main_menu()
+    elif choice == '2':
+        print("Launching Streamlit UI...")
+        venv_streamlit = os.path.join(os.path.dirname(sys.executable), 'streamlit')
+        cmd = f'"{venv_streamlit}" run Gr8-Summer-Stays/app.py'
+        os.system(cmd)
+    elif choice == '3':
+        print("Goodbye!")
+        sys.exit(0)
+    else:
+        print("Invalid choice. Please try again.")
+        launcher()
+
 if __name__ == "__main__":
-    main_menu()
+    launcher()
 
 
 
