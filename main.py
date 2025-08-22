@@ -77,7 +77,7 @@ def cli_sign_up():
         "group_size": group_size,
         "preferred_environment": preferred_environment,
         "budget": budget,
-        "password": hashed_password
+        "password_hash": hashed_password
     }
     core.add_user(new_user)
     print(f"✅ Sign up successful! Welcome {name}. You can now log in.")
@@ -113,6 +113,7 @@ def property_listings_menu(user):
     print("-"*30)
     print("1. Get recommended options according to your preferences")
     print("2. Chat with the AI travel agent to plan your vacation")
+    print("3. Back")
     print("-"*30)
     choice = input("Enter your choice: ")
     if choice == '1':
@@ -126,7 +127,7 @@ def property_listings_menu(user):
         print("Invalid choice.")
         property_listings_menu(user)
 
-# --- Vector Search Recommendation Logic ---
+# --- Vector Search Recommendation Logic (Deprecated)---
 def recommend_properties_by_preferences(user, top_k=3):
     import sys, importlib.util, os
     embeddings_path = os.path.abspath(os.path.join(os.path.dirname(__file__), 'Vector embeddings', 'create_embeddings.py'))
@@ -212,29 +213,15 @@ def generate_property_description(property_data, user):
         desc = ' '.join(words[:40]) + '...'
     return desc
     
-    def generate_property_description(property_data, user):
-        # Short, concise description (30-40 words max)
-        features = ', '.join(property_data['features'][:4])
-        tags = ', '.join(property_data['tags'][:3])
-        desc = (
-            f"A {property_data['type']} in {property_data['location']} with {features}. "
-            f"Great for {tags}. "
-            f"Enjoy comfort and adventure at ${property_data.get('price', 'your budget')} per night."
-        )
-        # Ensure description is about 30-40 words
-        words = desc.split()
-        if len(words) > 40:
-            desc = ' '.join(words[:40]) + '...'
-        return desc
-
+    
 # --- AI Travel Agent Chat ---
-def travel_agent_chat(user, recommended_properties=None):
+def travel_agent_chat(user, users, recommended_properties=None):
     print("\n--- Welcome to the AI Travel Agent! ---")
     print("Type 'exit' to end the chat.")
     chat_history = []
     # Prepare context string for the LLM
     if recommended_properties:
-        context_str = "Here are 3 recommended properties for the user: "
+        context_str = f"Here are {len(recommended_properties)} recommended properties for the user: "
         for idx, prop in enumerate(recommended_properties, 1):
             context_str += f"\nProperty #{idx}: ID: {prop['property_id']}, Location: {prop['location']}, Type: {prop['type']}, Features: {prop['features']}, Tags: {prop['tags']}"
     else:
@@ -244,7 +231,10 @@ def travel_agent_chat(user, recommended_properties=None):
         user_input = input("\033[96mYou:\033[0m ")  # Cyan for user
         if user_input.lower() == 'exit':
             print("\033[92mAI: Have a great trip! Goodbye!\033[0m")  # Green for AI
-            break
+            login_menu(user, users)
+            return
+        
+        # [TODO: Have not check if the recommended logic works with the chat agent]
         # Check if user refers to a recommended property by ID
         found = False
         matched_prop = None
@@ -385,47 +375,57 @@ def show_saved_properties(user):
         print()
 
 
-def edit_user_profile(user_id, users):
+def edit_user_profile(user, users):
     """
     Edit the user's profile information.
     """
-    for user in users:
-        if user["user_id"] == user_id:
-            print("\n" + "-"*30)
-            print("      EDIT PROFILE")
-            print("-"*30)
-            name = input(f"Name ({user['name']}): ") or user['name']
-            group_size = input(f"Group Size ({user['group_size']}): ") or user['group_size']
-            pref_input = input(f"Preferred Environment(s) (comma-separated) ({user['preferred_environment']}): ")
-            if pref_input:
-                # Split by comma, strip whitespace, and filter out empty strings
-                preferred_environment = [pref.strip() for pref in pref_input.split(',') if pref.strip()]
-            else:
-                preferred_environment = user['preferred_environment']
-            budget = input(f"Budget ({user['budget']}): ") or user['budget']
-            user.update({
-                "name": name,
-                "group_size": group_size,
-                "preferred_environment": preferred_environment,
-                "budget": budget
-            })
-            # Write the updated users list back to the JSON file
-            with open(USERS_FILE, 'w') as f:
-                json.dump(users, f, indent=4)
-            print("\nProfile updated successfully.\n")
-            return
+    print("\n" + "-"*30)
+    print("      EDIT PROFILE")
+    print("-"*30)
+    name = input(f"Name ({user.name}): ") or user.name
+    
+    group_input = input(f"Group Size ({user.group_size}): ")
+    group_size = group_input or user.group_size
+    
+    pref_input = input(f"Preferred Environment(s) (comma-separated) ({user.preferred_environment}): ")
+    if pref_input:
+        # Split by comma, strip whitespace, and filter out empty strings
+        preferred_environment = [pref.strip() for pref in pref_input.split(',') if pref.strip()]
+    else:
+        preferred_environment = user.preferred_environment
+        
+    budget_input = input(f"Budget ({user.budget}): ")
+    budget = budget_input or user.budget
+    
+    # Update the user object
+    user.name = name
+    user.group_size = group_size
+    user.preferred_environment = preferred_environment
+    user.budget = budget
+    
+    for i, u in enumerate(users):
+        if u.get("user_id") == user.user_id:
+            users[i] = user.to_dict()
+            break
 
-def delete_user_profile(user_id, users):
+    # Write the updated users list back to the JSON file
+    save_users(users, USERS_FILE)
+    print("\nProfile updated successfully.\n")
+
+def delete_user_profile(user, users):
     """
     Delete the user's profile.
     """
-    for user in users:
-        if user["user_id"] == user_id:
-            users.remove(user)
-            # Write the updated users list back to the JSON file
-            with open(USERS_FILE, 'w') as f:
-                json.dump(users, f, indent=4)
-            print("\nProfile deleted successfully.\n")
+    confirm = input(f"⚠️ Are you sure you want to delete profile for {user.name}? (y/n): ").strip().lower()
+    if confirm != "y":
+        print("❎ Deletion cancelled.")
+        return
+
+    for u in users:
+        if u.get("user_id") == user.user_id:
+            users.remove(u)
+            save_users(users, USERS_FILE)   
+            print(f"\n✅ Profile for {user.name} deleted successfully.\n")
             return
 
 

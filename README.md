@@ -212,3 +212,5 @@ Property ID: P00123 | Similarity: 0.82
   Description: A Beach Villa in Santorini, Greece with Ocean View, Pool, WiFi, Kitchen. Great for romantic, luxury, family. Enjoy comfort and adventure at $150 per night.
 ...
 ```
+
+Note: Do `pip install -r requirements.txt` under the root to install relavant modules before running the code!
